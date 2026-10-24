@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Recon Console</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: {
+  ink: '#0b1220', panel: '#111a2e', panel2: '#16223c', line: '#22304f',
+  accent: '#2f6bff', muted: '#8aa0c6' } } } };
+</script>
+<style>
+  body { background:#0b1220; color:#e6ecf7; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .nav-item.active { background:#16223c; color:#fff; border-left:3px solid #2f6bff; }
+  .nav-item { border-left:3px solid transparent; }
+  input[type=text]:focus, select:focus { outline:none; border-color:#2f6bff; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#22304f; border-radius:6px; }
+  .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body class="min-h-screen">
+<div class="flex min-h-screen">
+
+  <!-- Sidebar -->
+  <aside class="w-60 bg-panel border-r border-line flex flex-col shrink-0">
+    <div class="px-5 py-4 border-b border-line">
+      <div class="text-lg font-semibold tracking-tight">Recon Console</div>
+      <div class="text-xs text-muted mt-0.5">authorized testing only</div>
+    </div>
+    <nav class="flex-1 py-3 text-sm" id="nav">
+      <button data-view="scan"    class="nav-item active w-full text-left px-5 py-2.5">Scan Center</button>
+      <button data-view="jobs"    class="nav-item w-full text-left px-5 py-2.5">Scan Jobs</button>
+      <button data-view="assets"  class="nav-item w-full text-left px-5 py-2.5">Assets &amp; Services</button>
+      <button data-view="findings"class="nav-item w-full text-left px-5 py-2.5">Findings</button>
+      <button data-view="tools"   class="nav-item w-full text-left px-5 py-2.5">Tool Management</button>
+    </nav>
+    <div class="px-5 py-3 border-t border-line text-xs">
+      <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 mr-2"></span>
+      <span id="toolStatus" class="text-muted">Tools —/—</span>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="flex-1 overflow-y-auto">
+    <div class="max-w-6xl mx-auto px-8 py-7">
+
+      <!-- ===== SCAN CENTER ===== -->
+      <section id="view-scan">
+        <h1 class="text-2xl font-semibold mb-1">New scan</h1>
+        <p class="text-muted text-sm mb-6">Step 1 of 1 · Target and assessment profile</p>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="lg:col-span-2 bg-panel border border-line rounded-xl p-6">
+            <label class="block text-sm font-medium mb-1">Target IP, CIDR, hostname, or URL</label>
+            <input id="target" type="text" value="127.0.0.1"
+              class="w-full bg-panel2 border border-line rounded-lg px-4 py-2.5 text-sm"
+              placeholder="e.g. 10.10.5.0/24">
+            <p class="text-xs text-muted mt-1">Use only targets you are authorized to assess.</p>
+
+            <div class="mt-6">
+              <div class="text-sm font-medium mb-2">Scan mode</div>
+              <label class="flex items-start gap-3 py-1.5 cursor-pointer">
+                <input type="radio" name="mode" value="full" checked class="mt-1 accent-accent">
+                <span><span class="text-sm">Full network assessment</span>
+                  <span class="block text-xs text-muted">Run the complete pipeline (discovery → enrichment)</span></span>
+              </label>
+              <label class="flex items-start gap-3 py-1.5 cursor-pointer">
+                <input type="radio" name="mode" value="custom" class="mt-1 accent-accent">
+                <span><span class="text-sm">Custom scan</span>
+                  <span class="block text-xs text-muted">Pick the tools to run</span></span>
+              </label>
+              <label class="flex items-start gap-3 py-1.5 cursor-pointer">
+                <input type="radio" name="mode" value="single" class="mt-1 accent-accent">
+                <span><span class="text-sm">Single tool scan</span>
+                  <span class="block text-xs text-muted">Run one tool only</span></span>
+              </label>
+            </div>
+
+            <!-- Profile (full mode) -->
+            <div id="profileBlock" class="mt-6">
+              <div class="text-sm font-medium mb-2">Assessment profile</div>
+              <label class="flex items-center gap-3 py-1.5 cursor-pointer">
+                <input type="radio" name="profile" value="discovery" class="accent-accent">
+                <span class="text-sm">Discovery — live hosts and exposed services</span></label>
+              <label class="flex items-center gap-3 py-1.5 cursor-pointer">
+                <input type="radio" name="profile" value="standard" checked class="accent-accent">
+                <span class="text-sm">Standard — discovery, TLS and web checks</span></label>
+              <label class="flex items-center gap-3 py-1.5 cursor-pointer">
+                <input type="radio" name="profile" value="extended" class="accent-accent">
+                <span class="text-sm">Extended — adds default scripts (requires authorization)</span></label>
+              <label id="aggressiveBlock" class="flex items-start gap-3 mt-2 ml-7 cursor-pointer hidden">
+                <input id="aggressive" type="checkbox" class="accent-accent w-4 h-4 mt-0.5">
+                <span class="text-xs text-muted">I confirm active/intrusive checks are authorized for this target.</span>
+              </label>
+            </div>
+
+            <!-- Module picker (single/custom) -->
+            <div id="moduleBlock" class="mt-6 hidden">
+              <div class="text-sm font-medium mb-2">Choose modules</div>
+              <div id="moduleList" class="space-y-1"></div>
+            </div>
+
+            <label class="flex items-center gap-3 mt-7 cursor-pointer">
+              <input id="scope" type="checkbox" class="accent-accent w-4 h-4">
+              <span class="text-sm">I confirm the target is within the approved testing scope.</span>
+            </label>
+
+            <div class="mt-6 flex items-center gap-3">
+              <button id="startBtn"
+                class="bg-accent hover:bg-blue-600 disabled:opacity-40 text-white text-sm font-medium px-5 py-2.5 rounded-lg">
+                Start scan
+              </button>
+              <span id="startMsg" class="text-xs text-muted"></span>
+            </div>
+          </div>
+
+          <!-- Summary -->
+          <div class="bg-panel border border-line rounded-xl p-6 h-fit">
+            <div class="text-sm font-semibold mb-4">Profile summary</div>
+            <dl class="space-y-3 text-sm">
+              <div><dt class="text-muted text-xs">Target</dt><dd id="sumTarget">127.0.0.1</dd></div>
+              <div><dt class="text-muted text-xs">Scan mode</dt><dd id="sumMode">Full network assessment</dd></div>
+              <div><dt class="text-muted text-xs">Profile</dt><dd id="sumProfile">Standard</dd></div>
+            </dl>
+            <div class="text-muted text-xs mt-5 mb-2">Modules included</div>
+            <ul id="sumModules" class="space-y-1.5 text-sm"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== SCAN JOBS ===== -->
+      <section id="view-jobs" class="hidden">
+        <h1 class="text-2xl font-semibold mb-5">Scan jobs</h1>
+        <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+          <div class="lg:col-span-2 bg-panel border border-line rounded-xl overflow-hidden">
+            <table class="w-full text-sm">
+              <thead class="text-muted text-xs border-b border-line">
+                <tr><th class="text-left px-4 py-2.5">#</th><th class="text-left">Target</th>
+                    <th class="text-left">Profile</th><th class="text-left">Status</th></tr>
+              </thead>
+              <tbody id="jobRows"></tbody>
+            </table>
+            <div id="jobEmpty" class="text-muted text-sm px-4 py-6">No scans yet. Start one from Scan Center.</div>
+          </div>
+          <div class="lg:col-span-3 bg-panel border border-line rounded-xl p-5">
+            <div id="jobDetailEmpty" class="text-muted text-sm">Select a scan to see its progress.</div>
+            <div id="jobDetail" class="hidden">
+              <div class="flex items-center justify-between mb-3">
+                <div><span class="text-lg font-semibold" id="jdTarget"></span>
+                  <span id="jdStatus" class="ml-2 text-xs px-2 py-0.5 rounded-full"></span></div>
+                <div class="text-xs text-muted" id="jdMeta"></div>
+              </div>
+              <div class="log bg-ink border border-line rounded-lg p-3 text-xs h-72 overflow-y-auto whitespace-pre-wrap" id="jdLog"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== ASSETS ===== -->
+      <section id="view-assets" class="hidden">
+        <h1 class="text-2xl font-semibold mb-1">Assets &amp; services</h1>
+        <p class="text-muted text-sm mb-5" id="assetScope">Most recent scan</p>
+        <div id="assetList" class="space-y-3"></div>
+        <div id="assetEmpty" class="text-muted text-sm">No assets yet.</div>
+      </section>
+
+      <!-- ===== FINDINGS ===== -->
+      <section id="view-findings" class="hidden">
+        <h1 class="text-2xl font-semibold mb-5">Findings</h1>
+        <div id="findingList" class="space-y-2"></div>
+        <div id="findingEmpty" class="text-muted text-sm">No findings yet.</div>
+      </section>
+
+      <!-- ===== TOOLS ===== -->
+      <section id="view-tools" class="hidden">
+        <h1 class="text-2xl font-semibold mb-5">Tool management</h1>
+        <div id="toolList" class="space-y-2"></div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, o) => fetch(p, o).then(r => r.json());
+// Everything below renders server-side strings (hostnames, service banners, page
+// titles) into HTML. Those strings are attacker-influenced, so escape them.
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const MODE_LABEL = {full:"Full network assessment", custom:"Custom scan", single:"Single tool scan"};
+let TOOLS = [], lastJobId = null, pollTimer = null;
+
+// ---- navigation ----
+document.querySelectorAll('.nav-item').forEach(b => b.onclick = () => show(b.dataset.view));
+function show(view) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+  ['scan','jobs','assets','findings','tools'].forEach(v =>
+    $('#view-'+v).classList.toggle('hidden', v !== view));
+  if (view === 'jobs') loadJobs();
+  if (view === 'assets') loadAssets();
+  if (view === 'findings') loadFindings();
+  if (view === 'tools') renderTools();
+}
+
+// ---- scan center ----
+function mode() { return document.querySelector('input[name=mode]:checked').value; }
+function profile() { return document.querySelector('input[name=profile]:checked').value; }
+
+function refreshForm() {
+  const m = mode();
+  $('#profileBlock').classList.toggle('hidden', m !== 'full');
+  $('#moduleBlock').classList.toggle('hidden', m === 'full');
+  // module picker type: single = radio, custom = checkbox
+  $('#moduleList').innerHTML = TOOLS.map(t => {
+    const type = m === 'single' ? 'radio' : 'checkbox';
+    const dis = t.available ? '' : 'opacity-40';
+    return `<label class="flex items-center gap-3 py-1 cursor-pointer ${dis}">
+      <input type="${type}" name="module" value="${esc(t.name)}" class="accent-accent"
+        ${!t.available ? 'disabled title="binary not installed"' : ''}>
+      <span class="text-sm">${esc(t.name)}</span>
+      <span class="text-xs text-muted">${esc(t.description)}</span>
+      ${t.available ? '' : '<span class="text-xs text-amber-400">not installed</span>'}
+    </label>`;
+  }).join('');
+  updateSummary();
+}
+
+function selectedModules() {
+  return [...document.querySelectorAll('input[name=module]:checked')].map(i => i.value);
+}
+function summaryModules() {
+  if (mode() === 'full') {
+    const p = profile();
+    if (p === 'discovery') return ['nmap'];
+    return ['nmap','httpx','testssl.sh'];
+  }
+  return selectedModules();
+}
+function updateSummary() {
+  $('#sumTarget').textContent = $('#target').value || '—';
+  $('#sumMode').textContent = MODE_LABEL[mode()];
+  $('#sumProfile').textContent = mode()==='full'
+    ? profile().charAt(0).toUpperCase()+profile().slice(1) : '—';
+  const mods = summaryModules();
+  $('#sumModules').innerHTML = mods.length
+    ? mods.map(n => `<li class="flex items-center gap-2">
+        <span class="text-emerald-400">●</span>${esc(n)}</li>`).join('')
+    : '<li class="text-muted">None selected</li>';
+  $('#aggressiveBlock').classList.toggle(
+    'hidden', !(mode() === 'full' && profile() === 'extended'));
+}
+
+document.addEventListener('input', e => {
+  if (['target','mode','profile','module'].includes(e.target.name) || e.target.id === 'target')
+    (e.target.name === 'mode') ? refreshForm() : updateSummary();
+});
+
+$('#startBtn').onclick = async () => {
+  const body = {
+    target: $('#target').value.trim(),
+    scan_mode: mode(),
+    profile: profile(),
+    modules: mode() === 'full' ? [] : selectedModules(),
+    scope_confirmed: $('#scope').checked,
+    aggressive_ack: $('#aggressive').checked,
+  };
+  if (!body.scope_confirmed) { $('#startMsg').textContent = 'Confirm scope to continue.'; return; }
+  if (!body.target) { $('#startMsg').textContent = 'Enter a target.'; return; }
+  if (body.scan_mode !== 'full' && body.modules.length === 0) {
+    $('#startMsg').textContent = 'Select at least one module.'; return; }
+  if (body.profile === 'extended' && !body.aggressive_ack) {
+    $('#startMsg').textContent = 'Confirm active checks to run the extended profile.'; return; }
+
+  $('#startBtn').disabled = true; $('#startMsg').textContent = 'Queuing…';
+  try {
+    const res = await api('/api/scans', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    if (res.id) { $('#startMsg').textContent = ''; lastJobId = res.id; show('jobs'); openJob(res.id); }
+    else { $('#startMsg').textContent = res.detail || 'Failed to start.'; }
+  } catch (err) {
+    $('#startMsg').textContent = 'Could not reach the console API.';
+  } finally {
+    $('#startBtn').disabled = false;
+  }
+};
+
+// ---- jobs ----
+const STATUS_STYLE = {
+  queued:'bg-slate-600 text-white', running:'bg-accent text-white',
+  completed:'bg-emerald-600 text-white', failed:'bg-red-600 text-white'};
+async function loadJobs() {
+  const jobs = await api('/api/scans');
+  $('#jobEmpty').classList.toggle('hidden', jobs.length > 0);
+  $('#jobRows').innerHTML = jobs.map(j => `
+    <tr class="border-b border-line/50 hover:bg-panel2 cursor-pointer" onclick="openJob(${j.id})">
+      <td class="px-4 py-2.5">${j.id}</td><td>${esc(j.target)}</td>
+      <td class="capitalize">${esc(j.scan_mode==='full'?j.profile:j.scan_mode)}</td>
+      <td><span class="text-xs px-2 py-0.5 rounded-full ${STATUS_STYLE[j.status]||''}">${esc(j.status)}</span></td>
+    </tr>`).join('');
+}
+async function openJob(id) {
+  lastJobId = id;
+  $('#jobDetailEmpty').classList.add('hidden');
+  $('#jobDetail').classList.remove('hidden');
+  clearInterval(pollTimer);
+  const tick = async () => {
+    let j;
+    try { j = await api('/api/scans/'+id); }
+    catch (err) { $('#jdMeta').textContent = 'connection lost - retrying'; return; }
+    $('#jdTarget').textContent = j.target;
+    $('#jdStatus').className = 'ml-2 text-xs px-2 py-0.5 rounded-full ' + (STATUS_STYLE[j.status]||'');
+    $('#jdStatus').textContent = j.status;
+    $('#jdMeta').textContent = `scan #${j.id} · ${j.scan_mode==='full'?j.profile:j.scan_mode}`;
+    const el = $('#jdLog'); const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent = (j.log || '') + (j.error ? '\nERROR: '+j.error : '');
+    if (atBottom) el.scrollTop = el.scrollHeight;
+    if (j.status === 'completed' || j.status === 'failed') { clearInterval(pollTimer); loadJobs(); }
+  };
+  await tick(); pollTimer = setInterval(tick, 2000); loadJobs();
+}
+
+// ---- assets ----
+async function loadAssets() {
+  if (!lastJobId) { const j = await api('/api/scans'); lastJobId = j[0]?.id; }
+  if (!lastJobId) { $('#assetEmpty').classList.remove('hidden'); $('#assetList').innerHTML=''; return; }
+  const assets = await api('/api/scans/'+lastJobId+'/assets');
+  $('#assetScope').textContent = 'Scan #'+lastJobId;
+  $('#assetEmpty').classList.toggle('hidden', assets.length>0);
+  $('#assetList').innerHTML = assets.map(a => `
+    <div class="bg-panel border border-line rounded-xl p-4">
+      <div class="flex items-center gap-3 mb-2">
+        <span class="font-semibold">${esc(a.ip)}</span>
+        ${a.hostname?`<span class="text-xs text-muted">${esc(a.hostname)}</span>`:''}
+        ${a.os_guess?`<span class="text-xs text-muted">· ${esc(a.os_guess)}</span>`:''}
+      </div>
+      ${a.services.length ? `<table class="w-full text-sm">
+        <thead class="text-muted text-xs"><tr>
+          <th class="text-left font-normal w-20">Port</th>
+          <th class="text-left font-normal w-24">Service</th>
+          <th class="text-left font-normal">Product / version</th></tr></thead>
+        <tbody>${a.services.map(s=>`<tr class="border-t border-line/40">
+          <td class="py-1">${esc(s.port)}/${esc(s.protocol)}</td><td>${esc(s.name)||'—'}</td>
+          <td class="text-muted">${esc([s.product,s.version].filter(Boolean).join(' '))||'—'}</td>
+        </tr>`).join('')}</tbody></table>`
+        : '<div class="text-xs text-muted">No open services.</div>'}
+    </div>`).join('');
+}
+
+// ---- findings ----
+const SEV = {critical:'bg-red-600',high:'bg-orange-500',medium:'bg-amber-500',low:'bg-sky-600',info:'bg-slate-500'};
+async function loadFindings() {
+  if (!lastJobId) { const j = await api('/api/scans'); lastJobId = j[0]?.id; }
+  if (!lastJobId) { $('#findingEmpty').classList.remove('hidden'); return; }
+  const fs = await api('/api/scans/'+lastJobId+'/findings');
+  $('#findingEmpty').classList.toggle('hidden', fs.length>0);
+  $('#findingList').innerHTML = fs.map(f => `
+    <div class="bg-panel border border-line rounded-lg p-3 flex gap-3">
+      <span class="text-xs text-white px-2 py-0.5 rounded h-fit uppercase ${SEV[f.severity]||'bg-slate-500'}">${esc(f.severity)}</span>
+      <div class="min-w-0">
+        <div class="text-sm font-medium">${esc(f.title)}</div>
+        <div class="text-xs text-muted break-words">${esc(f.detail)}</div>
+        <div class="text-xs text-muted mt-0.5">${esc(f.source_tool)}${f.asset_ip?' · '+esc(f.asset_ip):''}</div>
+      </div>
+    </div>`).join('');
+}
+
+// ---- tools ----
+async function loadTools() {
+  const d = await api('/api/tools'); TOOLS = d.tools;
+  $('#toolStatus').textContent = `Tools ${d.online}/${d.total} online`;
+}
+function renderTools() {
+  $('#toolList').innerHTML = TOOLS.map(t => `
+    <div class="bg-panel border border-line rounded-lg p-4 flex items-center justify-between">
+      <div><div class="text-sm font-medium">${esc(t.name)}</div>
+        <div class="text-xs text-muted">${esc(t.description)} · <span class="font-mono">${esc(t.binary)}</span></div></div>
+      <span class="text-xs px-2.5 py-1 rounded-full ${t.available?'bg-emerald-600 text-white':'bg-slate-700 text-muted'}">
+        ${t.available?'available':'not installed'}</span>
+    </div>`).join('');
+}
+
+// ---- boot ----
+(async () => { await loadTools(); refreshForm(); })();
+</script>
+</body>
+</html>
