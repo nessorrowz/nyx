@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlmodel import select
+from sqlalchemy import func
 
 from app.db import init_db, get_session
 from app.models import Project, ScanJob, Asset, Service, Finding
@@ -99,6 +100,16 @@ def _get_or_make_project(name: str) -> int:
 # ----- scans -----
 SCAN_MODES = {"single", "custom", "full"}
 PROFILES = {"discovery", "standard", "extended"}
+
+# Service-word -> ports, so an engagement search for "smb" matches nmap's
+# "microsoft-ds" on 445/139. Extend as new tools/services are added.
+SERVICE_ALIASES = {
+    "smb": {139, 445}, "rdp": {3389}, "winrm": {5985, 5986},
+    "ldap": {389, 636}, "mssql": {1433}, "mysql": {3306},
+    "ssh": {22}, "ftp": {21}, "rpc": {135},
+}
+
+
 @app.post("/api/scans")
 def create_scan(body: ScanIn):
     # Scope gate. The mockup's confirmation checkbox, enforced server-side so a
@@ -155,7 +166,81 @@ def create_scan(body: ScanIn):
 def list_scans():
     with get_session() as s:
         rows = s.exec(select(ScanJob).order_by(ScanJob.id.desc())).all()
-        return [_job_summary(r) for r in rows]
+        # Counts let the UI default to (and flag) the scans that actually hold
+        # results. One grouped query each, not a per-job pair (no N+1).
+        asset_counts = dict(s.exec(
+            select(Asset.scan_job_id, func.count(Asset.id))
+            .group_by(Asset.scan_job_id)).all())
+        finding_counts = dict(s.exec(
+            select(Finding.scan_job_id, func.count(Finding.id))
+            .group_by(Finding.scan_job_id)).all())
+        out = []
+        for r in rows:
+            d = _job_summary(r)
+            d["assets"] = asset_counts.get(r.id, 0)
+            d["findings"] = finding_counts.get(r.id, 0)
+            out.append(d)
+        return out
+
+
+@app.get("/api/assets")
+def search_assets(service: str = "", port: int | None = None,
+                  project_id: int | None = None):
+    """Engagement-wide, host-centric query — the product's headline goal
+    ("which hosts expose SMB across the whole engagement?"). Merges assets
+    across every scan (optionally one project) and filters by service name /
+    product substring and/or port.
+    """
+    needle = service.strip().lower()
+    # nmap names SMB "microsoft-ds", RDP "ms-wbt-server", etc., so a plain
+    # substring search for "smb"/"rdp" would miss them. Map common service words
+    # to their ports so the PRD's "which hosts expose SMB?" query just works.
+    alias_ports = SERVICE_ALIASES.get(needle, set())
+    with get_session() as s:
+        q = select(Asset)
+        if project_id is not None:
+            # select(ScanJob.id) yields scalar ids, not ScanJob rows.
+            job_ids = s.exec(
+                select(ScanJob.id).where(ScanJob.project_id == project_id)).all()
+            q = q.where(Asset.scan_job_id.in_(job_ids or [-1]))
+        assets = s.exec(q).all()
+
+        merged: dict[str, dict] = {}
+        for a in assets:
+            svcs = s.exec(select(Service).where(Service.asset_id == a.id)).all()
+            matched = [
+                v for v in svcs
+                if (not needle or needle in v.name.lower()
+                    or needle in v.product.lower() or v.port in alias_ports)
+                and (port is None or v.port == port)
+            ]
+            if (needle or port is not None) and not matched:
+                continue
+            shown = matched if (needle or port is not None) else svcs
+            m = merged.setdefault(a.ip, {
+                "ip": a.ip, "hostname": a.hostname, "os_guess": a.os_guess,
+                "scan_ids": set(), "_ports": set(), "services": [],
+            })
+            m["scan_ids"].add(a.scan_job_id)
+            m["hostname"] = m["hostname"] or a.hostname
+            m["os_guess"] = m["os_guess"] or a.os_guess
+            for v in shown:
+                key = (v.port, v.protocol)
+                if key in m["_ports"]:
+                    continue
+                m["_ports"].add(key)
+                m["services"].append({
+                    "port": v.port, "protocol": v.protocol, "name": v.name,
+                    "product": v.product, "version": v.version})
+
+        result = []
+        for m in merged.values():
+            m["scan_ids"] = sorted(m.pop("scan_ids"))
+            m.pop("_ports")
+            m["services"].sort(key=lambda x: x["port"])
+            result.append(m)
+        result.sort(key=lambda m: m["ip"])
+        return result
 
 
 @app.get("/api/scans/{job_id}")

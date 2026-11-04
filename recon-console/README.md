@@ -84,6 +84,22 @@ Each UI screen maps to a table and an endpoint:
 | Findings          | Finding          | `GET /api/scans/{id}/findings`|
 | Tool Management   | (plugin registry)| `GET /api/tools`              |
 
+Assets & Services and Findings each carry a **scan selector** that defaults to
+the newest scan holding results (not blindly the newest job), and Assets also has
+an **engagement-wide query** — `GET /api/assets?service=smb&port=445` merges every
+host across all scans and filters by service/port, with aliases so `smb` matches
+nmap's `microsoft-ds`. That is the PRD's headline goal ("which hosts expose SMB
+across the engagement?") as a real endpoint.
+
+Enrichment depth pulled from the nmap XML: `os_guess` falls back to the service
+`cpe:/o:` / `extrainfo` when privileged `-O` isn't available, and NSE output
+(`-sC`, extended profile) becomes findings (`ftp-anon` → high, banners → info).
+testssl filters cipher-enumeration noise, maps `FATAL` → high so a broken scan
+can't look clean, and reports itself available only when its runtime deps
+(`hexdump`, one of `dig`/`host`/`nslookup`) are present — so it's correctly
+"not installed" on Windows, where it needs WSL/Linux. nmap runs with `-Pn` so
+ICMP-filtered internal hosts aren't skipped.
+
 ### Three design decisions that matter
 
 1. **Scans never run inside an HTTP request.** `POST /api/scans` validates,

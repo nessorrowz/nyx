@@ -7,23 +7,54 @@ actionable rather than a wall of cipher lines.
 from __future__ import annotations
 import json
 import os
+import shutil
 
 from .base import Plugin, PluginContext, PluginResult, FindingData
 
 TLS_PORTS = {443, 8443, 993, 995, 465, 990, 636, 989}
 TLS_NAMES = {"https", "ssl", "tls", "imaps", "pop3s", "smtps", "ldaps"}
 
-# testssl severity string -> our scale
+# testssl severity string -> our scale. FATAL is a scan failure (missing
+# dependency, unreachable host); surfacing it as high stops a broken run from
+# masquerading as a clean one.
 SEV_MAP = {
     "CRITICAL": "critical", "HIGH": "high", "MEDIUM": "medium",
     "LOW": "low", "WARN": "low", "INFO": "info", "OK": "info",
+    "FATAL": "high", "ERROR": "high",
 }
+
+# Cipher/handshake enumeration is a wall of low-value lines, not actionable
+# findings. Drop these ids unless testssl rated them high/critical (a genuinely
+# broken cipher), so output stays signal.
+_NOISE_PREFIXES = ("cipher", "cipherlist", "fs_", "quic", "pfs")
+_NOISE_IDS = {"engine_problem"}
+
+
+def _is_noise(sid: str) -> bool:
+    low = sid.lower()
+    return low in _NOISE_IDS or low.startswith(_NOISE_PREFIXES)
 
 
 class TestsslPlugin(Plugin):
     name = "testssl.sh"
     binary = "testssl.sh"
     description = "TLS and certificate assessment"
+
+    def is_available(self) -> bool:
+        """testssl.sh is a bash script with hard runtime deps. Report it
+        installed only if it and its prerequisites are actually runnable, so a
+        scan fails the availability check up front instead of dying mid-run.
+
+        On Windows `shutil.which` can't resolve a `.sh` (PATHEXT has no .sh), so
+        this is correctly False there — testssl needs WSL/Linux.
+        """
+        if not (shutil.which("testssl.sh") or shutil.which("testssl")):
+            return False
+        if shutil.which("hexdump") is None:
+            return False
+        if not any(shutil.which(b) for b in ("dig", "host", "nslookup")):
+            return False
+        return True
 
     def _tls_targets(self, ctx: PluginContext) -> list[tuple[str, int]]:
         targets = []
@@ -63,8 +94,12 @@ class TestsslPlugin(Plugin):
                 sev = SEV_MAP.get(str(e.get("severity", "INFO")).upper(), "info")
                 if sev == "info":
                     continue
+                sid = str(e.get("id", "finding"))
+                # Cipher enumeration noise: keep only if genuinely severe.
+                if _is_noise(sid) and sev in ("low", "medium"):
+                    continue
                 result.findings.append(FindingData(
-                    title=f"TLS: {e.get('id', 'finding')} on {tgt}",
+                    title=f"TLS: {sid} on {tgt}",
                     detail=str(e.get("finding", ""))[:500],
                     severity=sev,
                     source_tool="testssl.sh",

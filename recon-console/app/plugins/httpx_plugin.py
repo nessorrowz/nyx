@@ -10,9 +10,7 @@ import json
 import os
 
 from .base import Plugin, PluginContext, PluginResult, FindingData
-
-WEB_PORTS = {80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9090}
-WEB_NAMES = {"http", "https", "http-alt", "http-proxy"}
+from .web import web_endpoints
 
 
 class HttpxPlugin(Plugin):
@@ -23,20 +21,11 @@ class HttpxPlugin(Plugin):
     # the ProjectDiscovery banner so Tool Management doesn't false-positive.
     version_marker = "projectdiscovery"
 
-    def _web_endpoints(self, ctx: PluginContext) -> list[str]:
-        urls = []
-        for asset in ctx.assets:
-            for s in asset.services:
-                if s.port in WEB_PORTS or s.name in WEB_NAMES:
-                    scheme = "https" if s.port in (443, 8443) or "https" in s.name else "http"
-                    urls.append(f"{scheme}://{asset.ip}:{s.port}")
-        return urls
-
     def should_run(self, ctx: PluginContext) -> bool:
-        return bool(self._web_endpoints(ctx))
+        return bool(web_endpoints(ctx))
 
     async def run(self, ctx: PluginContext) -> PluginResult:
-        endpoints = self._web_endpoints(ctx)
+        endpoints = web_endpoints(ctx)
         ctx.log(f"httpx: probing {len(endpoints)} web endpoint(s)")
         result = PluginResult()
 
@@ -48,6 +37,8 @@ class HttpxPlugin(Plugin):
 
         rc, out, err = await self._exec(
             "httpx", "-json", "-silent", "-title", "-status-code", "-tech-detect",
+            # Bound per-host cost so a dead host doesn't stall a whole range.
+            "-timeout", "5", "-retries", "1", "-threads", "50",
             "-l", list_path, timeout=600,
         )
         if rc not in (0,) and not out:

@@ -154,6 +154,90 @@ class NmapParseTest(unittest.TestCase):
         self.assertEqual(asset.services[0].product, "SimpleHTTP")
 
 
+NMAP_SCRIPT_XML = """<?xml version="1.0"?>
+<nmaprun>
+<host><status state="up"/><address addr="10.0.0.9" addrtype="ipv4"/>
+<ports>
+<port protocol="tcp" portid="21"><state state="open"/>
+  <service name="ftp" product="vsftpd" version="3.0.3"/>
+  <script id="ftp-anon" output="Anonymous FTP login allowed (FTP code 230)"/></port>
+<port protocol="tcp" portid="22"><state state="open"/>
+  <service name="ssh" product="OpenSSH" version="8.2p1" ostype="Linux">
+    <cpe>cpe:/o:linux:linux_kernel</cpe></service>
+  <script id="ssh-hostkey" output="2048 aa:bb:cc"/></port>
+</ports></host>
+</nmaprun>"""
+
+
+class NmapDepthTest(unittest.TestCase):
+    def _write(self, xml):
+        wd = tempfile.mkdtemp()
+        p = os.path.join(wd, "n.xml")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(xml)
+        return p
+
+    def test_os_guess_falls_back_to_os_cpe(self):
+        path = self._write(NMAP_SCRIPT_XML)
+        assets = NmapPlugin._parse(
+            path, PluginContext(target="x", profile="standard", workdir="."))
+        self.assertEqual(assets[0].os_guess, "Linux")   # from cpe:/o:linux, no -O
+
+    def test_nse_output_becomes_findings_with_severity(self):
+        path = self._write(NMAP_SCRIPT_XML)
+        fs = NmapPlugin._findings(path)
+        by = {f.title.split(" on ")[0]: f for f in fs}
+        self.assertEqual(by["ftp-anon"].severity, "high")
+        self.assertEqual(by["ssh-hostkey"].severity, "info")
+        self.assertTrue(all(f.source_tool == "nmap" and f.asset_ip == "10.0.0.9"
+                            for f in fs))
+
+
+class TestsslNoiseTest(unittest.TestCase):
+    def test_cipher_noise_is_recognised_and_real_findings_are_not(self):
+        from app.plugins.testssl_plugin import _is_noise
+        for noisy in ("cipher-tls1_2_xc028", "cipherlist_LOW", "FS_KEMs",
+                      "engine_problem", "QUIC"):
+            self.assertTrue(_is_noise(noisy), noisy)
+        for keep in ("heartbleed", "BREACH", "cert_expiration", "scanProblem"):
+            self.assertFalse(_is_noise(keep), keep)
+
+
+class EngagementSearchTest(unittest.TestCase):
+    def test_search_merges_hosts_across_scans_and_aliases_smb(self):
+        from app.main import search_assets
+        init_db()
+        with get_session() as s:
+            p = Project(name="eng"); s.add(p); s.commit(); s.refresh(p)
+            pid = p.id                       # capture before the session closes
+            jobs = []
+            for _ in range(2):
+                j = ScanJob(project_id=p.id, target="10.0.0.0/24", scan_mode="full",
+                            profile="standard", scope_confirmed=True, status="completed")
+                s.add(j); s.commit(); s.refresh(j); jobs.append(j)
+            # same host (10.0.0.5) exposes SMB in both scans -> must merge to one.
+            for j in jobs:
+                a = Asset(scan_job_id=j.id, ip="10.0.0.5"); s.add(a); s.commit(); s.refresh(a)
+                s.add(Service(asset_id=a.id, port=445, name="microsoft-ds"))
+            # a web host that must NOT match an SMB search.
+            a2 = Asset(scan_job_id=jobs[0].id, ip="10.0.0.6"); s.add(a2); s.commit(); s.refresh(a2)
+            s.add(Service(asset_id=a2.id, port=80, name="http"))
+            s.commit()
+
+        smb = search_assets(service="smb", project_id=None)
+        hosts = {h["ip"] for h in smb}
+        self.assertIn("10.0.0.5", hosts)
+        self.assertNotIn("10.0.0.6", hosts)
+        row = next(h for h in smb if h["ip"] == "10.0.0.5")
+        self.assertEqual(len(row["scan_ids"]), 2, "same host in 2 scans merges, keeps both ids")
+        self.assertEqual([v["port"] for v in row["services"]], [445])
+
+        # project_id filter must not 500 (select(ScanJob.id) yields scalar ids).
+        scoped = search_assets(service="", project_id=pid)
+        self.assertEqual({h["ip"] for h in scoped}, {"10.0.0.5", "10.0.0.6"})
+        self.assertEqual(search_assets(service="", project_id=999999), [])
+
+
 class PipelineTest(unittest.TestCase):
     def _run(self, plugins, job_id=None):
         job_id = job_id or _new_job()

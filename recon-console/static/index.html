@@ -160,15 +160,28 @@ tailwind.config = { theme: { extend: { colors: {
 
       <!-- ===== ASSETS ===== -->
       <section id="view-assets" class="hidden">
-        <h1 class="text-2xl font-semibold mb-1">Assets &amp; services</h1>
-        <p class="text-muted text-sm mb-5" id="assetScope">Most recent scan</p>
+        <h1 class="text-2xl font-semibold mb-3">Assets &amp; services</h1>
+        <div class="flex flex-wrap items-center gap-3 mb-4">
+          <label class="text-sm text-muted">Scan</label>
+          <select id="assetJobSel" class="bg-panel2 border border-line rounded-lg px-3 py-1.5 text-sm"></select>
+          <span class="text-muted text-xs">or query the whole engagement:</span>
+          <input id="assetSearch" type="text" placeholder="service or port — e.g. smb, 445"
+            class="bg-panel2 border border-line rounded-lg px-3 py-1.5 text-sm w-56">
+          <button id="assetSearchBtn" class="bg-accent hover:bg-blue-600 text-white text-sm px-3 py-1.5 rounded-lg">Search</button>
+          <button id="assetSearchClear" class="text-muted text-xs underline hidden">clear</button>
+        </div>
+        <p class="text-muted text-sm mb-4" id="assetScope">Most recent scan</p>
         <div id="assetList" class="space-y-3"></div>
         <div id="assetEmpty" class="text-muted text-sm">No assets yet.</div>
       </section>
 
       <!-- ===== FINDINGS ===== -->
       <section id="view-findings" class="hidden">
-        <h1 class="text-2xl font-semibold mb-5">Findings</h1>
+        <h1 class="text-2xl font-semibold mb-3">Findings</h1>
+        <div class="flex items-center gap-3 mb-4">
+          <label class="text-sm text-muted">Scan</label>
+          <select id="findingJobSel" class="bg-panel2 border border-line rounded-lg px-3 py-1.5 text-sm"></select>
+        </div>
         <div id="findingList" class="space-y-2"></div>
         <div id="findingEmpty" class="text-muted text-sm">No findings yet.</div>
       </section>
@@ -372,28 +385,20 @@ function pollJob(id, el) {
 }
 
 // ---- assets ----
-async function loadAssets() {
-  if (!lastJobId) { const j = await api('/api/scans'); lastJobId = j[0]?.id; }
-  if (!lastJobId) { $('#assetEmpty').classList.remove('hidden'); $('#assetList').innerHTML=''; return; }
-  // Pull findings alongside assets so each host shows its own findings inline —
-  // a per-host picture instead of two disconnected tables.
-  const [assets, findings] = await Promise.all([
-    api('/api/scans/'+lastJobId+'/assets'),
-    api('/api/scans/'+lastJobId+'/findings'),
-  ]);
-  const byIp = {};
-  findings.forEach(f => { if (f.asset_ip) (byIp[f.asset_ip] ||= []).push(f); });
-  $('#assetScope').textContent = 'Scan #'+lastJobId;
-  $('#assetEmpty').classList.toggle('hidden', assets.length>0);
-  $('#assetList').innerHTML = assets.map(a => {
-    const fs = byIp[a.ip] || [];
-    return `
+// Render a host card. `byIp` carries per-host findings (per-scan view only);
+// `a.scan_ids` marks which scans saw the host (engagement search only).
+function assetCard(a, byIp) {
+  const fs = (byIp && byIp[a.ip]) || [];
+  const scanTag = a.scan_ids
+    ? `<span class="ml-auto text-xs text-muted">${a.scan_ids.map(i=>'#'+i).join(' ')}</span>`
+    : (fs.length?`<span class="ml-auto text-xs px-2 py-0.5 rounded-full bg-panel2 text-muted">${fs.length} finding${fs.length>1?'s':''}</span>`:'');
+  return `
     <div class="bg-panel border border-line rounded-xl p-4">
       <div class="flex items-center gap-3 mb-2">
         <span class="font-semibold">${esc(a.ip)}</span>
         ${a.hostname?`<span class="text-xs text-muted">${esc(a.hostname)}</span>`:''}
         ${a.os_guess?`<span class="text-xs text-muted">· ${esc(a.os_guess)}</span>`:''}
-        ${fs.length?`<span class="ml-auto text-xs px-2 py-0.5 rounded-full bg-panel2 text-muted">${fs.length} finding${fs.length>1?'s':''}</span>`:''}
+        ${scanTag}
       </div>
       ${a.services.length ? `<table class="w-full text-sm">
         <thead class="text-muted text-xs"><tr>
@@ -413,15 +418,85 @@ async function loadAssets() {
         </div>`).join('')}
       </div>`:''}
     </div>`;
-  }).join('');
 }
+
+// Fill a scan <select>; default to the newest scan that has results for this
+// view (the `countKey`), so switching to Assets/Findings never lands on an
+// empty newer job while an older one holds the data.
+function fillJobSelect(sel, jobs, countKey, keepValue) {
+  sel.innerHTML = jobs.map(j => {
+    const n = j[countKey] || 0;
+    const word = n === 1 ? countKey.slice(0, -1) : countKey;   // 1 asset / 2 assets
+    return `<option value="${j.id}">#${j.id} · ${esc(j.target)} · ${n} ${word}</option>`;
+  }).join('');
+  if (keepValue && jobs.some(j => String(j.id) === keepValue)) return keepValue;
+  const pick = jobs.find(j => (j[countKey]||0) > 0) || jobs[0];
+  sel.value = String(pick.id);
+  return String(pick.id);
+}
+
+async function loadAssets() {
+  const jobs = await api('/api/scans');
+  const sel = $('#assetJobSel');
+  if (!jobs.length) {
+    sel.innerHTML = ''; $('#assetList').innerHTML = '';
+    $('#assetEmpty').textContent = 'No scans yet.'; $('#assetEmpty').classList.remove('hidden');
+    return;
+  }
+  const pick = fillJobSelect(sel, jobs, 'assets', sel.value);
+  await renderAssetsForJob(+pick);
+}
+
+async function renderAssetsForJob(id) {
+  lastJobId = id;
+  $('#assetScope').textContent = 'Scan #'+id;
+  const [assets, findings] = await Promise.all([
+    api('/api/scans/'+id+'/assets'),
+    api('/api/scans/'+id+'/findings'),
+  ]);
+  const byIp = {};
+  findings.forEach(f => { if (f.asset_ip) (byIp[f.asset_ip] ||= []).push(f); });
+  $('#assetEmpty').classList.toggle('hidden', assets.length>0);
+  $('#assetEmpty').textContent = 'No assets in this scan.';
+  $('#assetList').innerHTML = assets.map(a => assetCard(a, byIp)).join('');
+}
+
+async function runAssetSearch() {
+  const raw = $('#assetSearch').value.trim();
+  if (!raw) return loadAssets();
+  const q = /^\d+$/.test(raw) ? 'port='+encodeURIComponent(raw)
+                              : 'service='+encodeURIComponent(raw);
+  const assets = await api('/api/assets?'+q);
+  $('#assetScope').textContent = `Engagement search: "${raw}" — ${assets.length} host(s)`;
+  $('#assetSearchClear').classList.remove('hidden');
+  $('#assetEmpty').classList.toggle('hidden', assets.length>0);
+  $('#assetEmpty').textContent = 'No hosts match across the engagement.';
+  $('#assetList').innerHTML = assets.map(a => assetCard(a, null)).join('');
+}
+
+$('#assetJobSel').onchange = e => { $('#assetSearch').value=''; $('#assetSearchClear').classList.add('hidden'); renderAssetsForJob(+e.target.value); };
+$('#assetSearchBtn').onclick = runAssetSearch;
+$('#assetSearch').addEventListener('keydown', e => { if (e.key === 'Enter') runAssetSearch(); });
+$('#assetSearchClear').onclick = () => { $('#assetSearch').value=''; $('#assetSearchClear').classList.add('hidden'); loadAssets(); };
 
 // ---- findings ----
 const SEV = {critical:'bg-red-600',high:'bg-orange-500',medium:'bg-amber-500',low:'bg-sky-600',info:'bg-slate-500'};
 async function loadFindings() {
-  if (!lastJobId) { const j = await api('/api/scans'); lastJobId = j[0]?.id; }
-  if (!lastJobId) { $('#findingEmpty').classList.remove('hidden'); return; }
-  const fs = await api('/api/scans/'+lastJobId+'/findings');
+  const jobs = await api('/api/scans');
+  const sel = $('#findingJobSel');
+  if (!jobs.length) {
+    sel.innerHTML = ''; $('#findingList').innerHTML = '';
+    $('#findingEmpty').textContent = 'No scans yet.'; $('#findingEmpty').classList.remove('hidden');
+    return;
+  }
+  const pick = fillJobSelect(sel, jobs, 'findings', sel.value);
+  await renderFindingsForJob(+pick);
+}
+
+async function renderFindingsForJob(id) {
+  lastJobId = id;
+  const fs = await api('/api/scans/'+id+'/findings');
+  $('#findingEmpty').textContent = 'No findings in this scan.';
   $('#findingEmpty').classList.toggle('hidden', fs.length>0);
   $('#findingList').innerHTML = fs.map(f => `
     <div class="bg-panel border border-line rounded-lg p-3 flex gap-3">
@@ -433,6 +508,7 @@ async function loadFindings() {
       </div>
     </div>`).join('');
 }
+$('#findingJobSel').onchange = e => renderFindingsForJob(+e.target.value);
 
 // ---- tools ----
 async function loadTools() {
