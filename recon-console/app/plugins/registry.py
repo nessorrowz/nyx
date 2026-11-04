@@ -8,11 +8,13 @@ from __future__ import annotations
 from .base import Plugin
 from .nmap_plugin import NmapPlugin
 from .httpx_plugin import HttpxPlugin
+from .wafw00f_plugin import Wafw00fPlugin
 from .testssl_plugin import TestsslPlugin
 
 PLUGINS: list[Plugin] = [
     NmapPlugin(),
     HttpxPlugin(),
+    Wafw00fPlugin(),
     TestsslPlugin(),
 ]
 
@@ -22,8 +24,8 @@ BY_NAME = {p.name: p for p in PLUGINS}
 # so later plugins have services to dispatch on.
 PROFILE_PIPELINE = {
     "discovery": ["nmap"],
-    "standard":  ["nmap", "httpx", "testssl.sh"],
-    "extended":  ["nmap", "httpx", "testssl.sh"],
+    "standard":  ["nmap", "httpx", "wafw00f", "testssl.sh"],
+    "extended":  ["nmap", "httpx", "wafw00f", "testssl.sh"],
 }
 
 

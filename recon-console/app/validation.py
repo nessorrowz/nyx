@@ -74,3 +74,47 @@ def _host(target: str) -> str:
     if not _HOSTNAME.match(target):
         raise ValueError("Not a valid IP address, CIDR range, hostname, or URL.")
     return target
+
+
+def parse_allowlist(raw: str | None) -> list[str]:
+    """Split a RECON_SCOPE string into entries. Empty/None -> no allowlist."""
+    if not raw:
+        return []
+    return [e.strip() for e in raw.replace("\n", ",").split(",") if e.strip()]
+
+
+def enforce_scope(target: str, allowlist: list[str]) -> None:
+    """Hard scope gate: reject a (already-normalized) target not inside the
+    approved set. An empty allowlist allows everything (the checkbox gate still
+    applies); a non-empty one is deny-by-default.
+
+    An allowlist entry is either a CIDR/IP (an IP or CIDR target must sit inside
+    it) or a domain (a hostname target must equal it or be a subdomain). IP and
+    domain targets are matched only against entries of the same kind.
+    """
+    if not allowlist:
+        return
+
+    tgt_net = _as_network(target)
+    for entry in allowlist:
+        entry_net = _as_network(entry)
+        if tgt_net is not None and entry_net is not None:
+            if (tgt_net.version == entry_net.version
+                    and tgt_net.subnet_of(entry_net)):
+                return
+        elif tgt_net is None and entry_net is None:
+            t, e = target.rstrip(".").lower(), entry.lstrip(".").rstrip(".").lower()
+            if t == e or t.endswith("." + e):
+                return
+
+    raise ValueError(
+        f"Target '{target}' is not within the approved scope allowlist."
+    )
+
+
+def _as_network(value: str):
+    """An IP or CIDR as an ip_network; None if it is a hostname/domain."""
+    try:
+        return ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return None

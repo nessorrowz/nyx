@@ -9,8 +9,9 @@ in-scope confirmation, enforced server-side.
 
 This is a working **foundation / vertical slice**, not a finished product: the
 full architecture is in place (async job queue, plugin system, host-centric DB,
-web UI) with nmap fully wired and two enrichment plugins (httpx, testssl.sh)
-demonstrating conditional dispatch. Extending it is a matter of adding plugins.
+web UI) with nmap fully wired and three enrichment plugins (httpx, wafw00f,
+testssl.sh) demonstrating conditional dispatch. Extending it is a matter of
+adding plugins.
 
 ## Run it
 
@@ -24,9 +25,9 @@ pip install -r requirements.txt    # fastapi, uvicorn, sqlmodel
 Open http://127.0.0.1:8777. It binds to loopback by default — keep it there, or
 put it behind a VPN/SSH tunnel and real auth before exposing it.
 
-To light up the other two modules, put their binaries on PATH:
-`httpx` (ProjectDiscovery) and `testssl.sh`. The Tool Management screen shows
-what's detected; missing tools are skipped gracefully, not errored.
+To light up the other modules, put their binaries on PATH:
+`httpx` (ProjectDiscovery), `wafw00f`, and `testssl.sh`. The Tool Management
+screen shows what's detected; missing tools are skipped gracefully, not errored.
 A tool whose name collides with an unrelated binary (plain `httpx` is also a Python
 HTTP client) is verified by its version banner, so it is reported as not installed
 rather than silently doing nothing. Set `version_marker` on such a plugin.
@@ -40,7 +41,20 @@ Unit tests need no tools and no network: `python -m unittest discover -s tests`.
 Every scan is validated server-side before it can be queued: the target must be an
 IP, a CIDR of /16 or narrower, a hostname, or an http(s) URL (a URL is reduced to
 its host), and the extended profile additionally requires `aggressive_ack` because
-it runs active nmap scripts.
+it runs active nmap scripts (which also attempt OS detection — best-effort, since
+that needs raw-socket privilege; nmap retries without it when unprivileged).
+
+**Hard scope allowlist.** Set `RECON_SCOPE` to a comma/newline-separated list of
+CIDRs and/or domains and the API rejects any target outside it, deny-by-default,
+before a job is ever queued — the strongest guardrail against a fat-fingered
+out-of-scope scan. An entry is a CIDR (an IP/CIDR target must sit inside it) or a
+domain (a hostname target must equal it or be a subdomain); IP and domain targets
+only match entries of their own kind. Unset means the in-scope checkbox alone
+applies.
+
+```bash
+export RECON_SCOPE="10.0.0.0/8,192.168.0.0/16,corp.example.com"
+```
 
 ## How it's built
 
@@ -55,6 +69,7 @@ app/
     registry.py        tool catalog, availability, pipeline selection
     nmap_plugin.py     discovery + service/version detection (XML parse)
     httpx_plugin.py    web probe  (runs only on hosts with web ports)
+    wafw00f_plugin.py  WAF detection (runs only on hosts with web ports)
     testssl_plugin.py  TLS checks (runs only on TLS services)
 static/index.html      the console UI (one file, no build step)
 ```
@@ -127,11 +142,13 @@ once you've obtained a foothold.
 - **Job backend:** swap the in-process `asyncio.Queue` in `jobs.py` for
   Celery/RQ/ARQ + Redis (multiple workers, crash-durable jobs). Plugins and DB
   don't change.
-- **Live updates:** the UI polls every 2s; move to SSE or WebSockets for instant
-  log streaming.
-- **Scope allowlist:** the in-scope checkbox is enforced, but add a hard
-  allowlist — reject any target not inside an approved CIDR/domain set in
-  `create_scan` before enqueueing. This is the single most valuable guardrail.
+- **Live updates:** the UI now streams the job log over Server-Sent Events
+  (`GET /api/scans/{id}/stream`), falling back to 2s polling if the stream
+  drops. For multi-worker durability move the stream to a Redis pub/sub or
+  WebSockets once the job backend below is swapped.
+- **Scope allowlist:** implemented via `RECON_SCOPE` (see above). For production,
+  store the approved set per-project in the DB rather than one process-wide env
+  var, so each engagement carries its own scope.
 - **Fragile-device handling:** internal ranges hide printers/appliances/OT gear.
   Add an exclude list and gate aggressive scripts behind a flag.
 - **AuthN/AuthZ**, DB → Postgres, and per-project scope storage.

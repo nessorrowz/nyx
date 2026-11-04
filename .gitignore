@@ -16,3 +16,6 @@ recon.db-shm
 .DS_Store
 .idea/
 .vscode/
+
+# Playwright MCP artifacts
+.playwright-mcp/

@@ -7,6 +7,7 @@ normalisation of a tool's output, the feed-forward/merge behaviour of the
 result store, per-plugin failure isolation, and the subprocess timeout path.
 """
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -25,7 +26,9 @@ from app.plugins.base import (  # noqa: E402
     AssetData, FindingData, Plugin, PluginContext, PluginResult, ServiceData,
 )
 from app.plugins.nmap_plugin import NmapPlugin  # noqa: E402
-from app.validation import normalize_target  # noqa: E402
+from app.validation import (  # noqa: E402
+    enforce_scope, normalize_target, parse_allowlist,
+)
 
 NMAP_XML = """<?xml version="1.0"?>
 <nmaprun>
@@ -94,6 +97,42 @@ class TargetValidationTest(unittest.TestCase):
     def test_refuses_oversized_ranges(self):
         with self.assertRaises(ValueError):
             normalize_target("10.0.0.0/8")
+
+
+class ScopeAllowlistTest(unittest.TestCase):
+    def test_empty_allowlist_allows_everything(self):
+        self.assertEqual(parse_allowlist(""), [])
+        self.assertEqual(parse_allowlist(None), [])
+        enforce_scope("8.8.8.8", [])          # no raise
+
+    def test_parse_splits_commas_and_newlines(self):
+        self.assertEqual(
+            parse_allowlist("10.0.0.0/8, example.com\n 192.168.1.0/24 "),
+            ["10.0.0.0/8", "example.com", "192.168.1.0/24"],
+        )
+
+    def test_ip_must_sit_inside_an_allowed_cidr(self):
+        allow = ["10.0.0.0/8", "192.168.1.0/24"]
+        enforce_scope("10.1.2.3", allow)              # in range
+        enforce_scope("10.1.2.0/24", allow)           # subnet of range
+        enforce_scope("192.168.1.50", allow)
+        for bad in ("8.8.8.8", "192.168.2.1", "10.0.0.0/4"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                enforce_scope(bad, allow)
+
+    def test_hostname_matches_domain_or_subdomain_only(self):
+        allow = ["example.com"]
+        enforce_scope("example.com", allow)
+        enforce_scope("api.example.com", allow)
+        for bad in ("evil.com", "notexample.com", "example.com.evil.com"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                enforce_scope(bad, allow)
+
+    def test_ip_and_domain_entries_do_not_cross_match(self):
+        with self.assertRaises(ValueError):
+            enforce_scope("10.0.0.1", ["example.com"])   # ip vs domain entry
+        with self.assertRaises(ValueError):
+            enforce_scope("example.com", ["10.0.0.0/8"]) # domain vs cidr entry
 
 
 class NmapParseTest(unittest.TestCase):
@@ -170,6 +209,55 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("timed out", err)
 
 
+class Wafw00fTest(unittest.TestCase):
+    def test_host_of_strips_scheme_port_and_brackets(self):
+        from app.plugins.wafw00f_plugin import _host_of
+        self.assertEqual(_host_of("https://10.0.0.5:8443/app"), "10.0.0.5")
+        self.assertEqual(_host_of("http://[::1]:80"), "::1")
+        self.assertEqual(_host_of("http://host.example"), "host.example")
+
+    def test_parse_keeps_detected_wafs_and_drops_none(self):
+        from app.plugins.wafw00f_plugin import Wafw00fPlugin
+        wd = tempfile.mkdtemp()
+        ctx = PluginContext(
+            target="10.0.0.5", profile="standard", workdir=wd,
+            assets=[AssetData(ip="10.0.0.5",
+                              services=[ServiceData(port=443, name="https")])],
+        )
+        out_path = os.path.join(wd, "wafw00f.json")
+
+        async def fake_exec(*cmd, timeout=600):
+            with open(out_path, "w", encoding="utf-8") as fh:
+                json.dump([
+                    {"url": "https://10.0.0.5:443", "detected": True,
+                     "firewall": "Cloudflare", "manufacturer": "Cloudflare Inc."},
+                    {"url": "https://10.0.0.5:443", "detected": False,
+                     "firewall": "None", "manufacturer": "None"},
+                ], fh)
+            return 0, "", ""
+
+        plugin = Wafw00fPlugin()
+        plugin._exec = fake_exec
+        result = asyncio.run(plugin.run(ctx))
+        self.assertEqual(len(result.findings), 1)
+        f = result.findings[0]
+        self.assertIn("Cloudflare", f.title)
+        self.assertEqual(f.asset_ip, "10.0.0.5")
+        self.assertEqual(f.source_tool, "wafw00f")
+
+    def test_only_runs_when_a_web_port_exists(self):
+        from app.plugins.wafw00f_plugin import Wafw00fPlugin
+        plugin = Wafw00fPlugin()
+        no_web = PluginContext(target="x", profile="standard", workdir=".",
+            assets=[AssetData(ip="1.1.1.1",
+                              services=[ServiceData(port=22, name="ssh")])])
+        web = PluginContext(target="x", profile="standard", workdir=".",
+            assets=[AssetData(ip="1.1.1.1",
+                              services=[ServiceData(port=80, name="http")])])
+        self.assertFalse(plugin.should_run(no_web))
+        self.assertTrue(plugin.should_run(web))
+
+
 class RegistryTest(unittest.TestCase):
     def test_order_is_catalog_order_not_selection_order(self):
         chosen = registry.select("custom", "standard", ["testssl.sh", "nmap"])
@@ -180,6 +268,10 @@ class RegistryTest(unittest.TestCase):
 
     def test_full_profile_discovery_is_nmap_only(self):
         self.assertEqual([p.name for p in registry.select("full", "discovery", [])], ["nmap"])
+
+    def test_standard_pipeline_runs_web_plugins_after_nmap(self):
+        names = [p.name for p in registry.select("full", "standard", [])]
+        self.assertEqual(names, ["nmap", "httpx", "wafw00f", "testssl.sh"])
 
 
 class ScanGateTest(unittest.TestCase):

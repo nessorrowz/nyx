@@ -10,11 +10,13 @@ Endpoints map 1:1 to the console screens:
 """
 from __future__ import annotations
 import asyncio
+import json
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlmodel import select
@@ -23,9 +25,15 @@ from app.db import init_db, get_session
 from app.models import Project, ScanJob, Asset, Service, Finding
 from app.plugins import registry
 from app import jobs
-from app.validation import normalize_target
+from app.validation import normalize_target, parse_allowlist, enforce_scope
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
+
+# Hard scope allowlist (CIDRs and/or domains, comma-separated). Deny-by-default
+# when set; empty means the checkbox gate alone applies. Read per-request so an
+# operator can tighten scope without a restart.
+def _allowlist() -> list[str]:
+    return parse_allowlist(os.environ.get("RECON_SCOPE"))
 
 
 @asynccontextmanager
@@ -101,6 +109,7 @@ def create_scan(body: ScanIn):
 
     try:
         target = normalize_target(body.target)
+        enforce_scope(target, _allowlist())
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -159,6 +168,49 @@ def get_scan(job_id: int):
         d["log"] = job.log
         d["error"] = job.error
         return d
+
+
+@app.get("/api/scans/{job_id}/stream")
+async def stream_scan(job_id: int):
+    """Server-Sent Events: push log lines and status as the worker writes them,
+    so the UI gets live updates without client-side polling. The worker and this
+    generator share the one event loop and the DB, so each tick reads committed
+    state. The stream closes itself once the job reaches a terminal state.
+    """
+    def sse(event: str, data) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    async def gen():
+        sent = 0
+        last_status = None
+        # Confirm the job exists before opening a long-lived stream.
+        with get_session() as s:
+            if not s.get(ScanJob, job_id):
+                yield sse("error", "No such scan.")
+                return
+        while True:
+            with get_session() as s:
+                job = s.get(ScanJob, job_id)
+                if not job:
+                    yield sse("error", "No such scan.")
+                    return
+                log, status, error = job.log or "", job.status, job.error
+            if len(log) > sent:
+                yield sse("log", log[sent:])
+                sent = len(log)
+            if status != last_status:
+                yield sse("status", status)
+                last_status = status
+            if status in ("completed", "failed"):
+                yield sse("done", error or "")
+                return
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/scans/{job_id}/assets")

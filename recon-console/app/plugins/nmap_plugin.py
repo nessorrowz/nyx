@@ -14,7 +14,11 @@ from .base import Plugin, PluginContext, PluginResult, AssetData, ServiceData
 PROFILE_FLAGS = {
     "discovery": ["-F", "-T4"],                         # top 100 ports, no version
     "standard":  ["--top-ports", "1000", "-sV", "-T4"],
-    "extended":  ["--top-ports", "1000", "-sV", "-sC", "-T4"],
+    # -O/--osscan-guess populate Asset.os_guess. OS detection needs raw-socket
+    # privilege; when nmap lacks it, bare -O makes nmap *quit* with no XML (it
+    # does not silently fall back like -sS does). run() handles that by retrying
+    # without -O, so discovery still works for an unprivileged extended scan.
+    "extended":  ["--top-ports", "1000", "-sV", "-sC", "-O", "--osscan-guess", "-T4"],
 }
 
 
@@ -30,6 +34,14 @@ class NmapPlugin(Plugin):
         ctx.log(f"nmap: {' '.join(cmd)}")
 
         rc, out, err = await self._exec(*cmd, timeout=3600)
+        # -O without privilege aborts the whole scan before any XML is written.
+        # Detect that and retry without OS detection so discovery is never lost.
+        if (rc != 0 and not os.path.exists(xml_path)
+                and ("-O" in flags or "--osscan-guess" in flags)):
+            ctx.log("nmap: OS detection needs root privilege; retrying without -O")
+            flags = [f for f in flags if f not in ("-O", "--osscan-guess")]
+            cmd = ["nmap", *flags, "-oX", xml_path, ctx.target]
+            rc, out, err = await self._exec(*cmd, timeout=3600)
         if rc != 0 and not os.path.exists(xml_path):
             ctx.log(f"nmap failed (rc={rc}): {err.strip()[:300]}")
             return PluginResult()
